@@ -565,7 +565,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         description='Evaluate MRI affine registration models')
     parser.add_argument('--model',      type=str, default='equivariant',
-                        choices=['standard', 'equivariant', 'escnn', 'synthmorph'])
+                        choices=['standard', 'equivariant','equivariant_moment', 'escnn', 'synthmorph'])
     parser.add_argument('--checkpoint', type=str, default=None,
                         help='Path to .pt checkpoint (not needed for --mode ants)')
     parser.add_argument('--data_dir',   type=str, default=None,

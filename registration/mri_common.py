@@ -161,8 +161,78 @@ class Net(torch.nn.Module):
         x = self.s3(self.b3(self.down(self.c3(x)))); x = self.s3a(self.b3a(self.c3a(x)))
         return self.c4(x).mean((-1, -2, -3))
 
+# ---------------------------------------------------------------------------
+# Ralph's input
+# ---------------------------------------------------------------------------t
 
-MODELS = {'standard': Net0, 'equivariant': Net}
+def centered_coords(n, spacing, ref):
+    """Positions of n output-grid points in the same centered frame apply_affine uses
+    (index - (n-1)/2), scaled by the total downsampling factor."""
+    return spacing * (torch.arange(n, device=ref.device, dtype=ref.dtype) - (n - 1) / 2)
+
+
+class NetMoment(torch.nn.Module):
+    """Equivariant moment-kernel model with a translation-equivariant last column."""
+    def __init__(self, ch0=4, mask_background=True, bg_thresh=1e-3):
+        super().__init__()
+        chin = 1
+        chout = [1, 3]   # 1 scalar (heatmap for a3) + 3 vectors (a0, a1, a2)
+        k, dim, p, o = 3, 3, 0, 3
+        bnkw = {'track_running_stats': True}
+        skw  = {'subtract_one': False}
+        self.mask_background = mask_background
+        self.bg_thresh = bg_thresh
+        self.step = 2    # one downsample (after c0) -> output voxels are 2 input voxels apart
+
+        self.down = mk.Downsample()
+
+        def blk(ci, co):
+            return (mk.OEConvBlock(ci, co, k, dim, padding=p),
+                    mk.OEBatchnormBlock(co, dim, **bnkw),
+                    mk.OESigmoidBlock(co, dim, **skw))
+
+        self.c0,  self.b0,  self.s0  = blk([chin],    [ch0]*o)
+        self.c0a, self.b0a, self.s0a = blk([ch0]*o,   [ch0]*o)
+        self.c1,  self.b1,  self.s1  = blk([ch0]*o,   [ch0*2]*o)
+        self.c1a, self.b1a, self.s1a = blk([ch0*2]*o, [ch0*2]*o)
+        self.c2,  self.b2,  self.s2  = blk([ch0*2]*o, [ch0*4]*o)
+        self.c2a, self.b2a, self.s2a = blk([ch0*4]*o, [ch0*4]*o)
+        self.c3,  self.b3,  self.s3  = blk([ch0*4]*o, [ch0*8]*o)
+        self.c3a, self.b3a, self.s3a = blk([ch0*8]*o, [ch0*8]*o)
+        self.c4 = mk.OEConvBlock([ch0*8]*o, chout, k, dim, padding=p)
+
+    def forward(self, x, return_heatmap=False):
+        grow = lambda m: torch.nn.functional.max_pool3d(m, 3, 1)   # mask follows each 3x3x3 conv
+        m = (x.abs() > self.bg_thresh).to(x.dtype)
+
+        x = self.s0(self.b0(self.down(self.c0(x))));  m = self.down(grow(m))
+        x = self.s0a(self.b0a(self.c0a(x)));          m = grow(m)
+        x = self.s1(self.b1(self.c1(x)));             m = grow(m)
+        x = self.s1a(self.b1a(self.c1a(x)));          m = grow(m)
+        x = self.s2(self.b2(self.c2(x)));             m = grow(m)
+        x = self.s2a(self.b2a(self.c2a(x)));          m = grow(m)
+        x = self.s3(self.b3(self.c3(x)));             m = grow(m)
+        x = self.s3a(self.b3a(self.c3a(x)));          m = grow(m)
+        x = self.c4(x);                               m = grow(m)
+
+        lin = x[:, 1:].mean((-1, -2, -3))             # a0, a1, a2
+
+        logits = x[:, 0]
+        if self.mask_background:
+            logits = logits.masked_fill(m[:, 0] == 0, float('-inf'))
+        B, d, h, w = logits.shape
+        prob = torch.softmax(logits.flatten(1), 1).view(B, d, h, w)
+        z  = centered_coords(d, self.step, x)
+        y  = centered_coords(h, self.step, x)
+        xx = centered_coords(w, self.step, x)
+        t = torch.stack([(prob.sum((2, 3)) * z).sum(1),
+                         (prob.sum((1, 3)) * y).sum(1),
+                         (prob.sum((1, 2)) * xx).sum(1)], 1)   # a3
+
+        out = torch.cat([lin, t], 1)
+        return (out, prob) if return_heatmap else out
+
+MODELS = {'standard': Net0, 'equivariant': Net, 'equivariant_moment': NetMoment}
 
 try:
     from escnn3d import Net_ESCNN

@@ -232,7 +232,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         description='Train standard or equivariant MRI affine registration model')
     parser.add_argument('--model',      type=str, required=True,
-                        choices=['standard', 'equivariant', 'escnn', 'synthmorph'])
+                        choices=['standard', 'equivariant','equivariant_moment', 'escnn', 'synthmorph'])
     parser.add_argument('--data_dir',   type=str, required=True,
                         help='Root directory containing adni_affine_processed/')
     parser.add_argument('--epochs',     type=int, default=120)
