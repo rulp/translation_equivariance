@@ -182,7 +182,7 @@ class NetMoment(torch.nn.Module):
         skw  = {'subtract_one': False}
         self.mask_background = mask_background
         self.bg_thresh = bg_thresh
-        self.step = 2    # one downsample (after c0) -> output voxels are 2 input voxels apart
+        self.step = 1    # step = 1 means no downsampling
 
         self.down = mk.Downsample()
 
@@ -205,15 +205,15 @@ class NetMoment(torch.nn.Module):
         grow = lambda m: torch.nn.functional.max_pool3d(m, 3, 1)   # mask follows each 3x3x3 conv
         m = (x.abs() > self.bg_thresh).to(x.dtype)
 
-        x = self.s0(self.b0(self.down(self.c0(x))));  m = self.down(grow(m))
-        x = self.s0a(self.b0a(self.c0a(x)));          m = grow(m)
-        x = self.s1(self.b1(self.c1(x)));             m = grow(m)
-        x = self.s1a(self.b1a(self.c1a(x)));          m = grow(m)
-        x = self.s2(self.b2(self.c2(x)));             m = grow(m)
-        x = self.s2a(self.b2a(self.c2a(x)));          m = grow(m)
-        x = self.s3(self.b3(self.c3(x)));             m = grow(m)
-        x = self.s3a(self.b3a(self.c3a(x)));          m = grow(m)
-        x = self.c4(x);                               m = grow(m)
+        x = self.s0(self.b0(self.c0(x)));          m = grow(m)
+        x = self.s0a(self.b0a(self.c0a(x)));       m = grow(m)
+        x = self.s1(self.b1(self.c1(x)));          m = grow(m)
+        x = self.s1a(self.b1a(self.c1a(x)));       m = grow(m)
+        x = self.s2(self.b2(self.c2(x)));          m = grow(m)
+        x = self.s2a(self.b2a(self.c2a(x)));       m = grow(m)
+        x = self.s3(self.b3(self.c3(x)));          m = grow(m)
+        x = self.s3a(self.b3a(self.c3a(x)));       m = grow(m)
+        x = self.c4(x);                            m = grow(m)
 
         lin = x[:, 1:].mean((-1, -2, -3))             # a0, a1, a2
 
