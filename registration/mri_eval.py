@@ -239,6 +239,122 @@ def eval_standard(args, net, loader, device, out_dir, stem):
     return results
 
 
+# Integer shifts in voxels, (D, H, W) order. Index 0 must be the zero shift: the
+# qualitative figure and the equivariance errors use it as the reference.
+TRANSLATIONS_NP = ([np.zeros(3)]
+                   + [s * np.eye(3)[i] for i in range(3) for s in (-4, -2, 2, 4)]
+                   + [np.array([3., 3., 3.]), np.array([-3., -3., -3.])])
+def eval_translation(args, net, loader, device, out_dir, stem):
+    """MSE, worst-case MSE over shifts, and translation equivariance/invariance errors."""
+    translations_t = [torch.tensor(T, device=device, dtype=dtype) for T in TRANSLATIONS_NP]
+    assert np.allclose(TRANSLATIONS_NP[0], 0), 'translation 0 must be the zero shift'
+    np.random.seed(args.seed)
+
+    # Precompute the shift matrices and their inverses once (not per batch).
+    T_mats     = []
+    T_inv_mats = []
+    for T0 in translations_t:
+        T = torch.eye(4, device=device, dtype=dtype)
+        T[:3, -1] = T0
+        T_mats.append(T)
+        T_inv_mats.append(torch.linalg.inv(T))
+
+    MSEsave, MSEworstsave = [], []
+    MSElinsave, MSEtranssave = [], []   # error split into a0-a2 and a3
+    equiv_save, inv_save = [], []
+    per_vol_mse = []
+    qual_candidates = []
+
+    with torch.no_grad():
+        for batch_idx, x in enumerate(loader):
+            x = x.to(device=device, dtype=dtype)
+            A = sample_batch_affines(x.shape[0], device, aug=args.aug)
+
+            Ahatsave, Esave, Elin, Etrans = [], [], [], []
+            for t_i, (T, T_inv) in enumerate(zip(T_mats, T_inv_mats)):
+                TA = T @ A                              # same random affine, then shifted by T
+                Ax = apply_affine(x, TA, device)
+                Ahat = predict_affine(net, Ax)
+                diff2 = (Ahat - TA[:, :3]) ** 2
+                Esave.append(diff2.sum((-1, -2)))
+                Elin.append(diff2[..., :3].sum((-1, -2)))
+                Etrans.append(diff2[..., 3].sum(-1))
+
+                Ahat4 = torch.eye(4, device=device, dtype=dtype)[None].repeat(x.shape[0], 1, 1)
+                Ahat4[:, :3] = Ahat
+                Ahatsave.append(T_inv @ Ahat4)          # undo the known shift
+                per_vol_mse.extend(Esave[-1].cpu().tolist())
+
+                if t_i == 0:
+                    for i in range(x.shape[0]):
+                        qual_candidates.append((
+                            Esave[-1][i].item(),
+                            x[i:i+1].cpu(), A[i:i+1].cpu(), Ahat4[i:i+1].cpu()))
+
+            # After undoing the shift, a perfect model gives the same matrix for every T.
+            U = torch.stack(Ahatsave)                   # (n_shift, B, 4, 4)
+            equiv = torch.linalg.norm(U[1:, :, :3, 3] - U[:1, :, :3, 3], dim=-1)            # voxels
+            inv = torch.linalg.norm((U[1:, :, :3, :3] - U[:1, :, :3, :3]).flatten(-2), dim=-1)
+            equiv_save.append(equiv.cpu())
+            inv_save.append(inv.cpu())
+
+            E = torch.stack(Esave)
+            MSEsave.append(E.cpu())
+            MSEworstsave.append(E.amax(0).cpu())
+            MSElinsave.append(torch.stack(Elin).cpu())
+            MSEtranssave.append(torch.stack(Etrans).cpu())
+
+    qual_candidates.sort(key=lambda t: t[0])
+    n_cand = len(qual_candidates)
+    selected = [qual_candidates[int(n_cand * q)] for q in (0.25, 0.50, 0.75)]
+    qual_examples = tuple(torch.cat([s[k] for s in selected]) for k in (1, 2, 3))
+
+    mse       = torch.cat(MSEsave, 1).float()       # (n_shift, n_test)
+    mse_wc    = torch.cat(MSEworstsave).float()
+    mse_lin   = torch.cat(MSElinsave, 1).float()
+    mse_trans = torch.cat(MSEtranssave, 1).float()
+    equiv     = torch.cat(equiv_save, 1).float()    # (n_shift - 1, n_test)
+    inv       = torch.cat(inv_save, 1).float()
+
+    results = {
+        'model': args.model,
+        'checkpoint': args.checkpoint,
+        'aug': args.aug,
+        'n_shift': len(TRANSLATIONS_NP),
+        'n_test': mse.shape[1],
+        'mse_mean':       float(mse.mean()),
+        'mse_std':        float(mse.std()),
+        'mse_lin_mean':   float(mse_lin.mean()),     # a0, a1, a2
+        'mse_trans_mean': float(mse_trans.mean()),   # a3
+        'mse_wc_mean':    float(mse_wc.mean()),
+        'mse_wc_std':     float(mse_wc.std()),
+        'a3_equiv_err_mean': float(equiv.mean()),    # voxels; 0 = perfectly equivariant
+        'a3_equiv_err_max':  float(equiv.max()),
+        'lin_inv_err_mean':  float(inv.mean()),      # 0 = a0-a2 perfectly invariant
+        'lin_inv_err_max':   float(inv.max()),
+        'per_shift': [{'T': TRANSLATIONS_NP[i].tolist(),
+                       'a3_equiv_err_mean': float(equiv[i - 1].mean()),
+                       'lin_inv_err_mean':  float(inv[i - 1].mean())}
+                      for i in range(1, len(TRANSLATIONS_NP))],
+    }
+
+    print(f'\nTranslation evaluation - {args.model}  ({results["n_test"]} volumes x {results["n_shift"]} shifts)')
+    print(f'  MSE (all 12 entries):     {results["mse_mean"]:.4f} +/- {results["mse_std"]:.4f}')
+    print(f'    a0-a2 part:             {results["mse_lin_mean"]:.4f}')
+    print(f'    a3 part:                {results["mse_trans_mean"]:.4f}')
+    print(f'  Worst-case MSE over shifts:{results["mse_wc_mean"]:.4f} +/- {results["mse_wc_std"]:.4f}')
+    print(f'  a3 equivariance error:    mean {results["a3_equiv_err_mean"]:.4f}  max {results["a3_equiv_err_max"]:.4f} voxels')
+    print(f'  a0-a2 invariance error:   mean {results["lin_inv_err_mean"]:.2e}  max {results["lin_inv_err_max"]:.2e}')
+    print('  per shift (a3 equiv err | a0-a2 inv err):')
+    for r in results['per_shift']:
+        print(f'    T={r["T"]}: {r["a3_equiv_err_mean"]:.4f} | {r["lin_inv_err_mean"]:.2e}')
+
+    plot_mse_histogram(per_vol_mse, args.model,
+                       os.path.join(out_dir, f'mse_histogram_translation_{stem}.png'))
+    plot_qualitative(qual_examples,
+                     os.path.join(out_dir, f'qualitative_translation_{stem}.png'))
+    return results
+
 # ---------------------------------------------------------------------------
 # Mode: rotation_sweep
 # MSE vs rotation angle around z-axis (mirrors DermaMNIST sweep figure)
@@ -533,6 +649,8 @@ def main(args):
 
     net = load_model(args, device)
     dataset = Dataset(args.data_dir, split='test')
+    if args.max_volumes is not None:
+        dataset = torch.utils.data.Subset(dataset, range(min(args.max_volumes, len(dataset))))
     loader  = torch.utils.data.DataLoader(dataset, batch_size=args.batch_size, num_workers=4)
     print(f'Test set: {len(dataset)} volumes')
 
@@ -549,6 +667,13 @@ def main(args):
             with open(out_json, 'w') as f:
                 json.dump(results, f, indent=2)
             print(f'Results saved: {out_json}')
+
+    elif args.mode == 'translation':
+        results = eval_translation(args, net, loader, device, out_dir, stem + aug_suffix)
+        out_json = os.path.join(out_dir, f'eval_translation_{stem}{aug_suffix}.json')
+        with open(out_json, 'w') as f:
+            json.dump(results, f, indent=2)
+        print(f'Results saved: {out_json}')
 
     elif args.mode == 'rotation_sweep':
         print(f'Running rotation sweep (step={args.angle_step}°)...')
@@ -572,10 +697,12 @@ if __name__ == '__main__':
                         help='Root directory containing adni_affine_processed/. '
                              'If omitted, read from the config JSON next to the checkpoint.')
     parser.add_argument('--mode',       type=str, default='standard',
-                        choices=['standard', 'rotation_sweep', 'ants'])
+                        choices=['standard','translation', 'rotation_sweep', 'ants'])
     parser.add_argument('--angle_step', type=int, default=10,
                         help='Degree increment for rotation_sweep (default 10)')
     parser.add_argument('--batch_size', type=int, default=16)
+    parser.add_argument('--max_volumes', type=int, default=None,
+                        help='Evaluate only the first N test volumes (quick checks)')
     parser.add_argument('--qual_only',  action='store_true', default=False,
                         help='standard mode: render only the qualitative figure, using '
                              'the identity orientation. The figure is identical (cases are '
