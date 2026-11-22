@@ -232,7 +232,26 @@ class NetMoment(torch.nn.Module):
         out = torch.cat([lin, t], 1)
         return (out, prob) if return_heatmap else out
 
-MODELS = {'standard': Net0, 'equivariant': Net, 'equivariant_moment': NetMoment}
+class NetMomentBaseline(NetMoment):
+    """Ablation of NetMoment: identical layers, but the last layer is 4 vector channels
+    and all four columns (including a3) are global means, as in the original Net."""
+    def __init__(self, ch0=4, **kwargs):
+        super().__init__(ch0=ch0, **kwargs)
+        k, dim, p, o = 3, 3, 0, 3
+        self.c4 = mk.OEConvBlock([ch0*8]*o, [0, 4], k, dim, padding=p)   # [0, 4] instead of [1, 3]
+
+    def forward(self, x):
+        x = self.s0(self.b0(self.c0(x)))
+        x = self.s0a(self.b0a(self.c0a(x)))
+        x = self.s1(self.b1(self.c1(x)))
+        x = self.s1a(self.b1a(self.c1a(x)))
+        x = self.s2(self.b2(self.c2(x)))
+        x = self.s2a(self.b2a(self.c2a(x)))
+        x = self.s3(self.b3(self.c3(x)))
+        x = self.s3a(self.b3a(self.c3a(x)))
+        return self.c4(x).mean((-1, -2, -3))          # (B, 12): a0, a1, a2, a3
+
+MODELS = {'standard': Net0, 'equivariant': Net, 'equivariant_moment': NetMoment, 'equivariant_moment_baseline': NetMomentBaseline}
 
 try:
     from escnn3d import Net_ESCNN
