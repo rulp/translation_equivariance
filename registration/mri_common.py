@@ -44,6 +44,8 @@ ORIENTATIONS_NP = _ORIENT_NP   # list of 48 (3,3) numpy arrays
 # Dataset
 # ---------------------------------------------------------------------------
 
+PAD = (18, 13, 18)   # (D, H, W) zero voxels per side; set to the values pad.py prints
+
 class Dataset(torch.utils.data.Dataset):
     def __init__(self, data_dir, split='train'):
         self.data_dir = data_dir
@@ -76,9 +78,12 @@ class Dataset(torch.utils.data.Dataset):
 
     def __getitem__(self, i):
         vol = nib.load(join(self.filesgood[i], 'processed_80.nii.gz'))
-        return torch.tensor(
+        x = torch.tensor(
             vol.get_fdata()[None] / PIXEL_SIGMA, dtype=dtype
-        )[..., 1:, 1:, 1:]
+        )[..., 1:, 1:, 1:]                                   # (1, 79, 89, 79)
+        x = x - x[:, :1, :1, :1]                             # background (corner value, ~ -32.4) -> exactly 0
+        pd, ph, pw = PAD
+        return torch.nn.functional.pad(x, (pw, pw, ph, ph, pd, pd))
 
 
 # ---------------------------------------------------------------------------
